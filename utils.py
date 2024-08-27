@@ -4,6 +4,7 @@
 这些函数可以在项目的不同部分中使用，以执行常见任务和操作。
 """
 
+import hashlib
 import os.path
 import logging
 from pyuque.client import Yuque
@@ -14,6 +15,8 @@ import functools
 import asyncio
 import aiohttp
 from urllib import parse
+
+from githubClient import GithubClient
 
 # yuque = Yuque("token")
 
@@ -115,23 +118,31 @@ def get_docs(repo_id,yuque:Yuque):
 # 获取文档Markdown代码
 def get_body(repo_id, doc_id,yuque:Yuque):
     doc = yuque.doc_get(repo_id, doc_id)
+
     body = doc['data']['body']
     body = re.sub("<a name=\"(\w.*)\"></a>", "", body)                 # 正则去除语雀导出的<a>标签
     body = re.sub(r'\<br \/\>', "\n", body)                            # 正则去除语雀导出的<br />标签
-    body = re.sub(r'\<br \/\>!\[image.png\]', "\n![image.png]", body)  # 正则去除语雀导出的图片后紧跟的<br />标签
-    body = re.sub(r'\)\<br \/\>', ")\n", body)                         # 正则去除语雀导出的图片后紧跟的<br />标签
+    # 第一步：处理 <br /> 后面紧跟着的 ![image.png]
+    body = re.sub(r'<br\s*/>\s*(\!\[image\.png\])', r'\n\1', body)
+    
+    # 第二步：处理 ) 后面的 <br />，但不影响图片链接之间的 <br />
+    body = re.sub(r'\)(<br\s*/>)(?!\s*\!\[)', r')\n', body)
+    
+    # 第三步：处理连续的图片链接，在它们之间添加换行符
+    body = re.sub(r'(\)\s*)(?=\!\[image\.png\])', r'\1\n', body)
     body = re.sub(r'png[#?](.*)+', 'png)', body)                       # 正则去除语雀图片链接特殊符号后的字符串
     body = re.sub(r'jpeg[#?](.*)+', 'jpeg)', body)                     # 正则去除语雀图片链接特殊符号后的字符串
     return body
 # 解析文档Markdown代码
-async def download_md(repo_id, repo_name, doc_id, doc_title):
-    body = get_body(repo_id, doc_id)
+async def download_md(repo_id, repo_name, doc_id, doc_title,yuque:Yuque,need_upload_github:bool):
+    body = get_body(repo_id, doc_id,yuque)
 
     # 创建文档目录及存放资源的子目录
     repo_dir = os.path.join(base_dir, repo_name)
     make_dir(repo_dir)
     assets_dir = os.path.join(repo_dir, "assets")
     make_dir(assets_dir)
+    print(body)
 
     # 保存图片
     pattern_images = r'(\!\[(.*)\]\((https:\/\/cdn\.nlark\.com\/yuque.*\/(\d+)\/(.*?\.[a-zA-z]+)).*\))'
@@ -144,10 +155,18 @@ async def download_md(repo_id, repo_name, doc_id, doc_title):
             local_abs_path = f"{assets_dir}/{doc_title}-{str(index)}.{image_suffix}"                # 保存图片的绝对路径
             doc_title_temp = doc_title.replace(" ", "%20").replace("(", "%28").replace(")", "%29")  # 对特殊符号进行编码
             local_md_path = f"![{doc_title_temp}-{str(index)}](assets/{doc_title_temp}-{str(index)}.{image_suffix})"  # 图片相对路径完整代码
+            
             await download_images(image_url, local_abs_path)     # 下载图片
-            body = body.replace(image_body, local_md_path)       # 替换链接
             # todo
             # 图片上传到github图床
+            # 上传到github
+            # 替换图片链接
+            if need_upload_github:
+                git_url =await upload_to_github(image_url)
+                body = body.replace(image_url, git_url)
+            else:
+                body = body.replace(image_body, local_md_path)       # 替换链接
+         
 
     # 保存附件
     pattern_annexes = r'(\[(.*)\]\((https:\/\/www\.yuque\.com\/attachments\/yuque.*\/(\d+)\/(.*?\.[a-zA-z]+)).*\))'
@@ -228,3 +247,40 @@ def my_repo_list_docs(self, namespace_or_id):
         'data': data_all
         }
     return my_dict
+async def upload_to_github(url):
+    config = {
+        'bucket': 'your-repo-name',
+        'prefix_key': 'images',
+        'host': 'https://cdn.jsdelivr.net'
+    }
+    client = GithubClient.get_instance(config)
+    uniqueId =  generateUniqueId(url)
+    fullName = uniqueId + "." + url.split(".")[-1]
+    # 检查图片是否存在
+    image_url = client.has_image(fullName)
+    if image_url:
+        print(f"图片已存在: {image_url}")
+        return image_url
+    else:
+        print("图片不存在")
+
+    # 上传图片
+    img_buffer =await getPicBufferFromURL(url)
+    uploaded_url = client.upload_img(img_buffer,fullName)
+    if uploaded_url:
+        print(f"图片上传成功: {uploaded_url}")
+        return uploaded_url
+    else:
+        print("图片上传失败")
+        return None
+
+# 根据url生成唯一文件名
+def generateUniqueId(url):
+    hash = hashlib.md5()
+    hash.update(url.encode('utf-8'))
+    return hash.hexdigest()
+
+async def getPicBufferFromURL(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            return await resp.content.read()
