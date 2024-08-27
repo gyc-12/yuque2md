@@ -157,7 +157,6 @@ async def download_md(repo_id, repo_name, doc_id, doc_title,yuque:Yuque,need_upl
             local_md_path = f"![{doc_title_temp}-{str(index)}](assets/{doc_title_temp}-{str(index)}.{image_suffix})"  # 图片相对路径完整代码
             
             await download_images(image_url, local_abs_path)     # 下载图片
-            # todo
             # 图片上传到github图床
             # 上传到github
             # 替换图片链接
